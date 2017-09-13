@@ -23,12 +23,6 @@
  *
  */
 
-
-
-
-
-
-
 /**
  *
  * Compute the spatial gradient of an image.

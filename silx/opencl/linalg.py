@@ -36,7 +36,9 @@ import numpy as np
 
 from .common import pyopencl, kernel_workgroup_size
 from .processing import EventDescription, OpenclProcessing, BufferDescription
+
 from .backprojection import _sizeof, _idivup
+import pyopencl.array as parray
 cl = pyopencl
 
 
@@ -51,7 +53,7 @@ d_grad = linalg.gradient(d_sino) # allocation + computation
 """
 
 
-class Linalg(OpenclProcessing):
+class LinAlg(OpenclProcessing):
 
     kernel_files = ["linalg.cl"]
 
@@ -76,17 +78,18 @@ class Linalg(OpenclProcessing):
 
         self.d_gradient = parray.zeros(self.queue, shape, np.complex64)
         self.d_image = parray.zeros(self.queue, shape, np.float32)
+        self.add_to_cl_mem({
+            "d_gradient": self.d_gradient,
+            "d_image": self.d_image
+        })
 
         self.wg2D = None
         self.shape = shape
         self.ndrange2D = (
-            self.shape[1],  # TODO pitch ?
+            self.shape[1],
             self.shape[0]
         )
-        self.do_check = bool(do_checks)
-
-
-
+        self.do_checks = bool(do_checks)
         OpenclProcessing.compile_kernels(self, self.kernel_files)
 
 
@@ -96,29 +99,30 @@ class Linalg(OpenclProcessing):
             raise ValueError("%s should be a %s array of type %s" %(arg_name, str(shape), str(dtype)))
 
 
-    def get_refs(self, src, dst, default_src_ref, default_dst_ref):
+    def get_data_references(self, src, dst, default_src_ref, default_dst_ref):
         """
         From various types of src and dst arrays,
-        returns the references that will be used by the OpenCL kernels.
+        returns the references to the underlying data (Buffer) that will be used by the OpenCL kernels.
+        # TODO documentation
 
         This function will make a copy host->device if the input is on host (eg. numpy array)
         """
-        if dst:
+        if dst is not None:
             if isinstance(dst, cl.array.Array):
                 dst_ref = dst.data
-            elif isinstance(image, cl.Buffer):
+            elif isinstance(dst, cl.Buffer):
                 dst_ref = dst
             else:
                 raise ValueError("dst should be either pyopencl.array.Array or pyopencl.Buffer")
         else:
             dst_ref = default_dst_ref
 
-        if isinstance(image, cl.array.Array):
+        if isinstance(src, cl.array.Array):
             src_ref = src.data
-        elif isinstance(image, cl.Buffer):
+        elif isinstance(src, cl.Buffer):
             src_ref = src
         else: # assuming numpy.ndarray
-            evt = cl.enqueue_copy(self.queue, self.d_image.data, image)
+            evt = cl.enqueue_copy(self.queue, default_src_ref, src)
             self.events.append(EventDescription("copy H->D", evt))
             src_ref = default_src_ref
         return src_ref, dst_ref
@@ -126,19 +130,21 @@ class Linalg(OpenclProcessing):
 
     def gradient(self, image, dst=None, return_to_host=False):
         """
+        Compute the spatial gradient of an image.
+        The gradient is computed with first-order difference (not central difference).
+
+        :param image: image to compute the gradient from. It can be either a numpy.ndarray, a pyopencl Array or Buffer.
+        :param dst: optional, reference to a destination pyopencl Array or Buffer. It must be of complex64 data type.
+        :param return_to_host: optional, set to True if you want the result to be transferred back to host.
 
         if dst is provided, it should be of type numpy.complex64 !
         """
-        # call gradient kernel with self.d_gradient if not dst, with dst otherwise
-        # return parray/buffer to dst or self.d_gradient
-
-        n_y, n_x = np.int32(image.shape)
-        events = []
+        n_y, n_x = np.int32(self.shape)
         if self.do_checks:
             self.check_array(image, np.float32, self.shape, "image")
-            if dst:
+            if dst is not None:
                 self.check_array(dst, np.complex64, self.shape, "dst")
-        img_ref, grad_ref = self.get_refs(image, dst, self.d_gradient.data, self.d_image.data)
+        img_ref, grad_ref = self.get_data_references(image, dst, self.d_image.data, self.d_gradient.data)
 
         # Prepare the kernel call
         kernel_args = [
@@ -154,12 +160,72 @@ class Linalg(OpenclProcessing):
             self.wg2D,
             *kernel_args
         )
-        events.append(EventDescription("gradient2D", evt))
+        self.events.append(EventDescription("gradient2D", evt))
 
         if return_to_host:
-            return grad_ref.get()
+            if dst is not None:
+                res_tmp = self.d_gradient.get()
+            else:
+                res_tmp = np.zeros(self.shape, dtype=np.complex64)
+                cl.enqueue_copy(self.queue, res_tmp, grad_ref)
+            res = np.zeros((2,) + self.shape, dtype=np.float32)
+            res[0] = np.copy(res_tmp.real)
+            res[1] = np.copy(res_tmp.imag)
+            return res
         else:
-            return grad_ref
+            return dst
+
+
+    def divergence(self, gradient, dst=None, return_to_host=False):
+        """
+        Compute the spatial divergence of an image.
+        The divergence is designed to be the (negative) adjoint of the gradient.
+
+        :param gradient: gradient-like array to compute the divergence from. It can be either a numpy.ndarray, a pyopencl Array or Buffer.
+        :param dst: optional, reference to a destination pyopencl Array or Buffer. It must be of complex64 data type.
+        :param return_to_host: optional, set to True if you want the result to be transferred back to host.
+
+        if dst is provided, it should be of type numpy.complex64 !
+        """
+        n_y, n_x = np.int32(self.shape)
+        # numpy.ndarray gradients are expected to be (2, n_y, n_x)
+        if isinstance(gradient, np.ndarray):
+            gradient2 = np.zeros(self.shape, dtype=np.complex64)
+            gradient2.real = np.copy(gradient[0])
+            gradient2.imag = np.copy(gradient[1])
+            gradient = gradient2
+        elif self.do_checks:
+            self.check_array(gradient, np.complex64, self.shape, "gradient")
+            if dst is not None:
+                self.check_array(dst, np.float32, self.shape, "dst")
+        grad_ref, img_ref = self.get_data_references(gradient, dst, self.d_gradient.data, self.d_image.data)
+
+        # Prepare the kernel call
+        kernel_args = [
+            grad_ref,
+            img_ref,
+            n_x,
+            n_y
+        ]
+        # Call the gradient kernel
+        evt = self.program.kern_divergence2D(
+            self.queue,
+            self.ndrange2D,
+            self.wg2D,
+            *kernel_args
+        )
+        self.events.append(EventDescription("divergence2D", evt))
+
+        if return_to_host:
+            if dst is not None:
+                res = self.d_image.get()
+            else:
+                res = np.zeros(self.shape, dtype=np.float32)
+                cl.enqueue_copy(self.queue, res, img_ref)
+            return res
+        else:
+            return dst
+
 
 
 
@@ -174,14 +240,6 @@ class Linalg(OpenclProcessing):
     #
     #  - modify projector and backprojector  for a  "onlygpu" computation, returning a parray
     #
-
-
-
-    def __del__(self):
-        # todo: delete parrays which were not added in cl_mem
-        OpenclProcessing.__del__(self)
-        self.d_gradient = None
-        self.d_image = None
 
 
 
