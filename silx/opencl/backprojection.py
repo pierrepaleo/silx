@@ -105,14 +105,14 @@ class Backprojection(OpenclProcessing):
                                   platformid=platformid, deviceid=deviceid,
                                   profile=profile)
 
-        self.init_geometry(sino_shape, slice_shape, angles, axis_position,
+        self._init_geometry(sino_shape, slice_shape, angles, axis_position,
                            extra_options)
-        self.allocate_memory()
-        self.compute_angles()
-        self.init_kernels()
-        self.init_filter(filter_name)
+        self._allocate_memory()
+        self._compute_angles()
+        self._init_kernels()
+        self._init_filter(filter_name)
 
-    def init_geometry(self, sino_shape, slice_shape, angles, axis_position,
+    def _init_geometry(self, sino_shape, slice_shape, angles, axis_position,
                       extra_options):
         """Geometry Initialization
 
@@ -144,9 +144,9 @@ class Backprojection(OpenclProcessing):
         else:
             self.axis_pos = np.float32((sino_shape[1] - 1.) / 2)
         self.axis_array = None  # TODO: add axis correction front-end
-        self.init_extra_options(extra_options)
+        self._init_extra_options(extra_options)
 
-    def init_extra_options(self, extra_options):
+    def _init_extra_options(self, extra_options):
         """Backprojection extra option initialization
 
         :param dict extra_options: Advanced extra options
@@ -157,7 +157,7 @@ class Backprojection(OpenclProcessing):
         if extra_options is not None:
             self.extra_options.update(extra_options)
 
-    def allocate_memory(self):
+    def _allocate_memory(self):
         # Host memory
         self.slice = np.zeros(self.dimrec_shape, dtype=np.float32)
         self.is_cpu = False
@@ -177,12 +177,12 @@ class Backprojection(OpenclProcessing):
 
         # Texture memory (if relevant)
         if not(self.is_cpu):
-            self.allocate_textures()
+            self._allocate_textures()
 
         # Local memory
         self.local_mem = 256 * 3 * _sizeof(np.float32)  # constant for all image sizes
 
-    def compute_angles(self):
+    def _compute_angles(self):
         if self.angles is None:
             self.angles = np.linspace(0, np.pi, self.num_projs, False)
         h_cos = np.cos(self.angles).astype(np.float32)
@@ -194,7 +194,7 @@ class Backprojection(OpenclProcessing):
         else:
             self.cl_mem["d_axes"][:] = np.ones(self.num_projs, dtype="f") * self.axis_pos
 
-    def init_kernels(self):
+    def _init_kernels(self):
         OpenclProcessing.compile_kernels(self, self.kernel_files)
         # check that workgroup can actually be (16, 16)
         self.compiletime_workgroup_size = self.kernels.max_workgroup_size("backproj_cpu_kernel")
@@ -234,7 +234,7 @@ class Backprojection(OpenclProcessing):
             self._get_local_mem()
         )
 
-    def allocate_textures(self):
+    def _allocate_textures(self):
         """
         Allocate the texture for the sinogram.
         """
@@ -248,7 +248,7 @@ class Backprojection(OpenclProcessing):
             hostbuf=np.zeros(self.shape[::-1], dtype=np.float32)
         )
 
-    def init_filter(self, filter_name):
+    def _init_filter(self, filter_name):
         """Filter initialization
 
         :param str filter_name: filter name
@@ -264,7 +264,7 @@ class Backprojection(OpenclProcessing):
     def _get_local_mem(self):
         return pyopencl.LocalMemory(self.local_mem)  # constant for all image sizes
 
-    def cpy2d_to_slice(self, dst):
+    def _cpy2d_to_slice(self, dst):
         ndrange = (int(self.slice_shape[1]), int(self.slice_shape[0]))
         slice_shape_ocl = np.int32(ndrange)
         wg = None
@@ -279,9 +279,9 @@ class Backprojection(OpenclProcessing):
         )
         return self.kernels.cpy2d(self.queue, ndrange, wg, *kernel_args)
 
-    def transfer_to_texture(self, sino):
+    def _transfer_to_texture(self, sino):
         if isinstance(sino, parray.Array):
-            return self.transfer_device_to_texture(sino)
+            return self._transfer_device_to_texture(sino)
         sino2 = sino
         if not(sino.flags["C_CONTIGUOUS"] and sino.dtype == np.float32):
             sino2 = np.ascontiguousarray(sino, dtype=np.float32)
@@ -304,7 +304,7 @@ class Backprojection(OpenclProcessing):
             what = "transfer filtered sino H->D texture"
         return EventDescription(what, ev)
 
-    def transfer_device_to_texture(self, d_sino):
+    def _transfer_device_to_texture(self, d_sino):
         if self.is_cpu:
             if id(self.d_sino) == id(d_sino):
                 return
@@ -337,7 +337,7 @@ class Backprojection(OpenclProcessing):
         """
         events = []
         with self.sem:
-            events.append(self.transfer_to_texture(sino))
+            events.append(self._transfer_to_texture(sino))
             # Call the backprojection kernel
             if self.is_cpu:
                 kernel_to_call = self.kernels.backproj_cpu_kernel
@@ -355,7 +355,7 @@ class Backprojection(OpenclProcessing):
                 res = res[:self.slice_shape[0], :self.slice_shape[1]]
             else:
                 res = output
-                self.cpy2d_to_slice(output)
+                self._cpy2d_to_slice(output)
 
         # /with self.sem
         if self.profile:
