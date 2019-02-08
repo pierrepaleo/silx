@@ -37,7 +37,8 @@ import numpy as np
 from .common import pyopencl
 from .processing import EventDescription, OpenclProcessing, BufferDescription
 from .sinofilter import SinoFilter
-
+from .sinofilter import fourier_filter as fourier_filter_
+from ..utils.deprecation import deprecated
 
 if pyopencl:
     mf = pyopencl.mem_flags
@@ -378,3 +379,18 @@ class Backprojection(OpenclProcessing):
         return res
 
     __call__ = filtered_backprojection
+
+
+    # -------------------
+    # - Compatibility  -
+    # -------------------
+
+    @deprecated(replacement="Backprojection.sino_filter", since_version="0.9")
+    def filter_projections(self, sino, rescale=True):
+        self.sino_filter(sino, output=self.d_sino)
+
+
+
+def fourier_filter(sino, filter_=None, fft_size=None):
+    return fourier_filter_(sino, filter_=filter_, fft_size=fft_size)
+
